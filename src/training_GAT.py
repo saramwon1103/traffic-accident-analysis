@@ -152,20 +152,22 @@ print(content)
 
 """# Huấn luyện"""
 
-pip install torch-geometric
+!pip install torch_geometric
+
+# **Huấn luyện và trực quan hóa mô hình GAT**
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv, LayerNorm
-from torch_geometric.data import Data
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
-import seaborn as sns
+from sklearn.metrics import accuracy_score, f1_score
 import matplotlib.pyplot as plt
+import pandas as pd
+from torch_geometric.nn import GATConv, LayerNorm
 from imblearn.over_sampling import SMOTE
+from torch_geometric.data import Data
+from sklearn.model_selection import train_test_split
 
-# Xử lý mất cân bằng dữ liệu bằng over-sampling
+# **Định nghĩa Focal Loss**
 class FocalLoss(torch.nn.Module):
     def __init__(self, alpha=None, gamma=2.0):
         super(FocalLoss, self).__init__()
@@ -174,11 +176,11 @@ class FocalLoss(torch.nn.Module):
 
     def forward(self, logits, targets):
         ce_loss = F.cross_entropy(logits, targets, weight=self.alpha, reduction="none")
-        pt = torch.exp(-ce_loss)  # Tính xác suất dự đoán đúng
+        pt = torch.exp(-ce_loss)
         focal_loss = (1 - pt) ** self.gamma * ce_loss
         return focal_loss.mean()
 
-# Chuyển đổi đồ thị sang PyG Data
+# **Chuyển đổi từ NetworkX sang PyG Data (giả định G đã được định nghĩa)**
 def networkx_to_pyg(G, label_attr="damage"):
     node_mapping = {node: i for i, node in enumerate(G.nodes())}
     edge_index = torch.tensor([[node_mapping[u], node_mapping[v]] for u, v in G.edges()], dtype=torch.long).t().contiguous()
@@ -192,43 +194,19 @@ def networkx_to_pyg(G, label_attr="damage"):
 
     X = torch.tensor(features, dtype=torch.float)
     y = torch.tensor(labels, dtype=torch.long)
-
     return Data(x=X, edge_index=edge_index, y=y)
 
-# Chuyển đổi đồ thị
-graph_data = networkx_to_pyg(G)
-
-# Cân bằng dữ liệu bằng SMOTE
-X_resampled, y_resampled = SMOTE().fit_resample(graph_data.x.numpy(), graph_data.y.numpy())
-graph_data.x = torch.tensor(X_resampled, dtype=torch.float)
-graph_data.y = torch.tensor(y_resampled, dtype=torch.long)
-
-# Chia tập train/test/val
-train_nodes, remaining_nodes = train_test_split(range(graph_data.num_nodes), test_size=0.4, random_state=42)
-test_nodes, val_nodes = train_test_split(remaining_nodes, test_size=0.25, random_state=42)
-
-graph_data.train_mask = torch.tensor(train_nodes, dtype=torch.long)
-graph_data.test_mask = torch.tensor(test_nodes, dtype=torch.long)
-graph_data.val_mask = torch.tensor(val_nodes, dtype=torch.long)
-
-# Trọng số class cho Focal Loss
-unique, counts = np.unique(graph_data.y.numpy(), return_counts=True)
-class_weights = torch.tensor(1.0 / counts, dtype=torch.float)
-class_weights /= class_weights.sum()
-loss_fn = FocalLoss(alpha=class_weights, gamma=2.0)
-
-# Mô hình GAT
+# **Mô hình GAT**
 class GAT(torch.nn.Module):
     def __init__(self, in_features, hidden_dim, out_features, heads=8):
         super(GAT, self).__init__()
         self.gat1 = GATConv(in_features, hidden_dim, heads=heads, dropout=0.2)
-        self.ln1 = LayerNorm(hidden_dim * heads)  # LayerNorm thay cho BatchNorm
+        self.ln1 = LayerNorm(hidden_dim * heads)
 
         self.gat2 = GATConv(hidden_dim * heads, hidden_dim, heads=4, dropout=0.2)
         self.ln2 = LayerNorm(hidden_dim * 4)
 
         self.gat3 = GATConv(hidden_dim * 4, out_features, heads=1, concat=False, dropout=0.2)
-
         self.dropout = torch.nn.Dropout(0.1)
 
     def forward(self, x, edge_index):
@@ -245,64 +223,118 @@ class GAT(torch.nn.Module):
         x = self.gat3(x, edge_index)
         return F.log_softmax(x, dim=1)
 
-# Khởi tạo mô hình
-model = GAT(in_features=graph_data.x.shape[1], hidden_dim=16, out_features=len(graph_data.y.unique()))
-optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=5e-4)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+# **Danh sách cấu hình để thử nghiệm**
+lr_list = [0.001, 0.0005]
+split_ratios = [(0.6, 0.2, 0.2), (0.7, 0.1, 0.2)]
 
-# Huấn luyện mô hình
-epochs = []
-accuracies = []
-f1_scores = []
-num_epochs = 100
-for epoch in range(num_epochs):
-    model.train()
-    optimizer.zero_grad()
+results = []
 
-    out = model(graph_data.x, graph_data.edge_index)
-    loss = loss_fn(out[graph_data.train_mask], graph_data.y[graph_data.train_mask])
-    loss.backward()
-    optimizer.step()
-    scheduler.step(loss)
+for lr in lr_list:
+    for train_ratio, val_ratio, test_ratio in split_ratios:
 
-    # Đánh giá mô hình
-    model.eval()
-    with torch.no_grad():
-        logits = model(graph_data.x, graph_data.edge_index)
-        pred = logits.argmax(dim=1)
+        # Tạo bản sao dữ liệu và xử lý SMOTE
+        data = networkx_to_pyg(G)
+        X_resampled, y_resampled = SMOTE().fit_resample(data.x.numpy(), data.y.numpy())
+        data.x = torch.tensor(X_resampled, dtype=torch.float)
+        data.y = torch.tensor(y_resampled, dtype=torch.long)
 
-        y_true = graph_data.y[graph_data.test_mask].cpu().numpy()
-        y_pred = pred[graph_data.test_mask].cpu().numpy()
+        # Chia dữ liệu
+        num_nodes = data.num_nodes
+        idx = list(range(num_nodes))
+        train_idx, temp_idx = train_test_split(idx, train_size=train_ratio, random_state=42)
+        val_size = val_ratio / (val_ratio + test_ratio)
+        val_idx, test_idx = train_test_split(temp_idx, train_size=val_size, random_state=42)
 
-        acc = accuracy_score(y_true, y_pred)
-        f1 = f1_score(y_true, y_pred, average='macro')
+        data.train_mask = torch.tensor(train_idx, dtype=torch.long)
+        data.val_mask = torch.tensor(val_idx, dtype=torch.long)
+        data.test_mask = torch.tensor(test_idx, dtype=torch.long)
 
-        epochs.append(epoch)
-        accuracies.append(acc)
-        f1_scores.append(f1)
+        # Tính trọng số class
+        unique, counts = np.unique(data.y.numpy(), return_counts=True)
+        class_weights = torch.tensor(1.0 / counts, dtype=torch.float)
+        class_weights /= class_weights.sum()
+        loss_fn = FocalLoss(alpha=class_weights, gamma=2.0)
 
-        if epoch % 20 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item():.4f}, Accuracy: {acc:.4f}, F1-score: {f1:.4f}")
+        # Huấn luyện mô hình
+        model = GAT(in_features=data.x.shape[1], hidden_dim=16, out_features=len(data.y.unique()))
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=5e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
 
-# Tính confusion_matrix
-cm = confusion_matrix(y_true, y_pred)
-plt.figure(figsize=(6,5))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(y_true), yticklabels=np.unique(y_true))
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
-plt.title("Confusion Matrix")
+        accuracies, f1_scores, epochs = [], [], []
+        for epoch in range(100):
+            model.train()
+            optimizer.zero_grad()
+            out = model(data.x, data.edge_index)
+            loss = loss_fn(out[data.train_mask], data.y[data.train_mask])
+            loss.backward()
+            optimizer.step()
+            scheduler.step(loss)
 
+            model.eval()
+            with torch.no_grad():
+                logits = model(data.x, data.edge_index)
+                pred = logits.argmax(dim=1)
 
-# In confusion_matrix dạng văn bản
-print("Confusion Matrix:")
-print(cm)
+                y_true = data.y[data.test_mask].cpu().numpy()
+                y_pred = pred[data.test_mask].cpu().numpy()
+                acc = accuracy_score(y_true, y_pred)
+                f1 = f1_score(y_true, y_pred, average='macro')
 
-plt.figure(figsize=(10, 5))
-plt.plot(epochs, accuracies, label='Accuracy', marker='o')
-plt.plot(epochs, f1_scores, label='F1-score', marker='x')
-plt.xlabel('Epoch')
-plt.ylabel('Giá trị')
-plt.title('Accuracy và F1-score theo Epoch')
-plt.legend()
-plt.grid(True)
+                epochs.append(epoch)
+                accuracies.append(acc)
+                f1_scores.append(f1)
+
+        # Lưu kết quả
+        results.append({
+            'lr': lr,
+            'split': f"{int(train_ratio*100)}/{int(val_ratio*100)}/{int(test_ratio*100)}",
+            'epochs': epochs,
+            'acc': accuracies,
+            'f1': f1_scores
+        })
+
+        # Vẽ biểu đồ
+        plt.figure(figsize=(10, 5))
+        plt.plot(epochs, accuracies, label='Accuracy', marker='o')
+        plt.plot(epochs, f1_scores, label='F1-score', marker='x')
+        plt.xlabel('Epoch')
+        plt.ylabel('Giá trị')
+        plt.title(f"Learning Rate = {lr} | Split: {int(train_ratio*100)}/{int(val_ratio*100)}/{int(test_ratio*100)}")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+# **Tạo bảng tổng hợp kết quả cuối cùng**
+summary = []
+for r in results:
+    summary.append({
+        'Learning Rate': r['lr'],
+        'Split': r['split'],
+        'Accuracy Cuối': round(r['acc'][-1], 4),
+        'F1-score Cuối': round(r['f1'][-1], 4)
+    })
+
+# In bảng
+df = pd.DataFrame(summary)
+print(df.to_markdown(index=False))
+
+import matplotlib.pyplot as plt
+
+# Vẽ bảng kết quả
+fig, ax = plt.subplots(figsize=(8, 2.5))
+ax.axis('off')  # Ẩn trục
+
+table = ax.table(
+    cellText=df.values,
+    colLabels=df.columns,
+    cellLoc='center',
+    loc='center'
+)
+
+table.auto_set_font_size(False)
+table.set_fontsize(12)
+table.scale(1.2, 1.5)
+
+plt.title("Bảng Tổng Hợp Kết Quả Cuối Cùng", fontsize=14, pad=10)
+plt.tight_layout()
 plt.show()
