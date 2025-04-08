@@ -1,0 +1,19 @@
+# Ignore macOS system files
+.DS_Store
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Environment files
+.env
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode files
+.vscode/
+
+# Logs
+*.log
+
