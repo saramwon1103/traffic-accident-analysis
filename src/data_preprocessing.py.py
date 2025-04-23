@@ -8,6 +8,9 @@ df = pd.read_csv("D:/traffic_accidents.csv", encoding='utf-8')  # Thử với ut
 if "crash_date" in df.columns:
     df = df.drop(columns=["crash_date"])
 
+# Xóa các dòng chứa giá trị thiếu
+df = df.dropna()
+
 # Các cột cần mã hóa
 categorical_columns = [
     "traffic_control_device", "weather_condition", "lighting_condition", "first_crash_type", 
